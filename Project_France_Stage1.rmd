@@ -1,0 +1,289 @@
+---
+title: "Project - France"
+author: "Jakub Doležal"
+date: "15. 3. 2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+#### Outline:
+
+1.  Transformation to logs\
+2.  Seasonal adjustments\
+3.  Transformation to percentage changes\
+4.  Estimation, diagnostics and forecasting\
+5.  Output gap
+
+#### Preliminaries
+
+Libraries
+
+```{r}
+rm(list=ls())
+
+library(repr)
+library(uroot)
+library(urca)
+library(strucchange)
+library(stats)
+library(pdfetch)
+library(xts)
+library(ggplot2)
+library(ggfortify) 
+library(forecast)
+library(tsbox) 
+library(seasonal)
+library(tseries)
+library(TSA)
+library(mFilter)
+library(neverhpfilter)
+```
+
+**Data:**
+
+We use the following units:
+
+GDP: Chain linked volumes (2015) HICP: 2015=100
+
+```{r}
+gdp_xts_q <- pdfetch_EUROSTAT("namq_10_gdp", S_ADJ="SCA", NA_ITEM="B1GQ", FREQ="Q", UNIT="CLV15_MEUR", GEO="FR")
+
+inf_xts_m <- pdfetch_EUROSTAT("PRC_HICP_MIDX", CL_COICOP="CP00", FREQ="M", UNIT="I15", GEO="FR")
+
+inf_xts_m00 <- inf_xts_m[,"M.I15.CP00.FR"]
+
+```
+
+Conversion to ts object:
+
+```{r}
+gdp <- ts_first_of_period(gdp_xts_q)
+gdp_ts <- ts_ts(gdp)
+gdp <- gdp_ts
+
+inf <- ts_first_of_period(inf_xts_m00)
+inf_ts <- ts_ts(inf)
+inf <- inf_ts
+```
+
+### 1. Tranformation to logs
+
+```{r}
+log_gdp <- log(gdp)
+log_inf <- log(inf)
+
+autoplot(log_gdp, main = "log of real GDP (chain linked volumes (2015))")
+autoplot(log_inf, main = "log of HICP (2015=100)")
+```
+
+### 2. Seasonal adjustments
+
+```{r}
+
+log_inf
+
+linf <- window(log_inf, end=c(2023,3))
+
+inf_ts_log_seas <- seas(linf)
+inf_log_seas <- inf_ts_log_seas$data[,1]
+
+autoplot(inf_ts_log_seas)
+```
+
+### 3. Transformation to percentage changes
+
+Transformed series of GDP are indicated as stationary by ADF test. However, log-difference is not enough to make HICP in both cases stationary. We therefore take simple log-difference and address this issues in ARIMA model (p, 1, q) as suggested in the feedback\
+
+From now on:\
+gdp_ld = log-differenced q-o-q GDP\
+inf_ld = log-differenced m-o-m HICP\
+gdp_yoy = log-differenced y-o-y GDP\
+inf_yoy = log-differenced y-o-y HICP
+
+```{r}
+gdp_ld <- diff(log_gdp)*100 #q-o-q
+inf_ld <- diff(inf_log_seas)*100 #m-o-m
+
+?arima
+
+gdp_yoy <- na.omit(diff(log_gdp, lag = 4)*100)
+inf_yoy <- na.omit(diff(inf_log_seas, lag = 12)*100)
+
+adf.test(gdp_ld)
+adf.test(inf_ld)
+adf.test(gdp_yoy)
+adf.test(inf_yoy)
+
+autoplot(gdp_ld)
+autoplot(inf_ld)
+autoplot(gdp_yoy)
+autoplot(inf_yoy)
+```
+
+Periodogram and Spectrum Analysis: Periodogram does not show any sign of seasonality. Our time series are I(1), except the m-o-m HICP and y-o-y HICP (I(2)).
+
+```{r}
+periodogram(gdp_ld) #periodogram
+spec.pgram(gdp_ld, detrend = FALSE) #spectrum without detrend
+
+periodogram(inf_ld) #periodogram
+spec.pgram(inf_ld, detrend = FALSE) #spectrum without detrend
+```
+
+Structrural Breaks:
+
+Z-A test identifies a structural break both in GDP (attributed to COVID-19 pandemic) and HICP (record-high inflation of the past months) in the very end of our data set. However, no structural breaks are found by the Chow test.
+
+```{r}
+chow_inf <- inf_ld
+plot.ts(chow_inf)
+sctest(ts(chow_inf[1:325]) ~ chow_inf[2:326], type="Chow")
+
+chow_gdp <- gdp_ld
+plot.ts(chow_gdp)
+sctest(ts(chow_gdp[1:171]) ~ chow_gdp[2:172], type="Chow")
+```
+
+```{r}
+za_GDP <- ur.za(gdp_ld, model = c("intercept", "trend", "both"), lag=NULL)
+summary(za_GDP)
+plot(za_GDP)
+
+za_inf <- ur.za(inf_ld, model = c("intercept", "trend", "both"), lag=NULL)
+summary(za_inf)
+plot(za_inf)
+```
+
+Identification Correlogram: We perform the Box-Jenkins step-by-step estimation consisting of identification, estimation, diagnostics and forecasting.
+
+```{r}
+acf(gdp_ld, lag.max = 24)
+pacf(gdp_ld, lag.max = 24)
+
+acf(inf_ld, lag.max = 24)
+pacf(inf_ld, lag.max = 24)
+
+acf(gdp_yoy, lag.max = 24)
+pacf(gdp_yoy, lag.max = 24)
+
+acf(inf_yoy, lag.max = 24)
+pacf(inf_yoy, lag.max = 24)
+
+```
+
+### 4. Estimation, diagnostics and forecasting
+
+Estimation:
+
+We construct ARIMA models according to ACFs and PACFs. For HICP, the model takes (p, 1, q) for to ensure stationarity of estimated series.
+
+```{r}
+fit_gdp <- forecast::Arima(gdp_ld, order = c(2,0,1), include.mean = TRUE)
+fit_gdp
+
+fit_inf <- forecast::Arima(inf_ld, order = c(1,1,4), include.mean = TRUE)
+fit_inf
+
+fit_gdp_yoy <- forecast::Arima(gdp_yoy, order = c(1,0,3), include.mean = FALSE)
+fit_gdp_yoy
+
+fit_inf_yoy <- forecast::Arima(inf_yoy, order = c(2,1,4), include.mean = FALSE)
+fit_inf_yoy
+```
+
+Diagnostics:
+
+We employed the sarima function from "astsa" package for complex diagnostics. Residuals are uncorrelated, normally distributed and thus resemble white noise, which is confirmed by the Ljung-Box test (we are unable to reject the iid nature of residuals).
+
+```{r}
+library(astsa)
+fit_gdp_diag <- sarima(gdp_ld, p = 2, d = 0, q = 1, no.constant = FALSE, details = TRUE) #diagnostics ARIMA(2,0,1)
+
+fit_inf_diag <- sarima(inf_ld, p = 1, d = 1, q = 4, no.constant = FALSE, details = TRUE) #diagnostics ARIMA(1,1,4)
+
+fit_gdp_yoy_diag <- sarima(gdp_yoy, p = 1, d = 0, q = 3, no.constant = TRUE, details = TRUE) #diagnostics ARIMA(1,0,2)
+
+fit_inf_yoy_diag <- sarima(inf_yoy, p = 2, d = 1, q = 4, no.constant = TRUE, details = TRUE) #diagnostics ARIMA(2,1,4)
+```
+
+Forecasting:
+
+```{r}
+fcst_gdp <- forecast::forecast(fit_gdp, h=8)
+plot(fcst_gdp)
+
+fcst_inf <- forecast::forecast(fit_inf, h=24)
+plot(fcst_inf)
+
+fcst_gdp_yoy <- forecast::forecast(fit_gdp_yoy, h=8)
+plot(fcst_gdp_yoy)
+
+fcst_inf_yoy <- forecast::forecast(fit_inf_yoy, h=24)
+plot(fcst_inf_yoy)
+```
+
+### 5. Output gap
+
+Hodrick-Prescott filter:
+
+```{r}
+hp <- hpfilter(log_gdp, freq = 1600)
+hp_trend <- hp$trend
+hp_cycle <- hp$cycle
+plot(hp)
+```
+
+Hamilton filter:
+
+# Hamilton filter
+
+```{r}
+# Requires xts format
+log_gdp_xts <- ts_xts(log_gdp)
+gdp_HAM <- yth_filter(log_gdp_xts, h= 8, p = 4)
+par(mfrow=c(1,1))
+plot(gdp_HAM["1980/2022"][,1:2], grid.col = "white", legend.loc = "topleft", main = "Log of Real GDP and trend", panels = 'lines(gdp_HAM["1980/2022"][,3], type="h", on=NA)')
+HAM_trend <- ts_ts(gdp_HAM$value.trend)
+HAM_cycle <- ts_ts(gdp_HAM$value.cycle)
+```
+
+Spectra comparison:
+
+Output gaps are dominantly defined by low frequencies (trends) as shown by the spectrum analysis. On the other hand GDP is defined mostly by higher frequencies (probably a result of using log-differenced time series).
+
+```{r}
+library(TSA)
+
+periodogram(gdp_ld) #periodogram
+spec.pgram(gdp_ld, detrend = FALSE) #spectrum without detrend
+
+periodogram(gdp_yoy) #periodogram
+spec.pgram(gdp_yoy, detrend = FALSE) #spectrum without detrend
+
+periodogram(hp_cycle) #periodogram
+spec.pgram(hp_cycle, detrend = FALSE) #spectrum without detrend
+
+HAM_per <- window(HAM_cycle, start = c(1982,4))
+
+periodogram(HAM_per) #periodogram
+spec.pgram(HAM_per, detrend = FALSE) #spectrum without detrend
+```
+
+Stationarity and forecast: Both output gap time series are stationary.
+
+```{r}
+adf.test(hp_cycle)
+adf.test(HAM_per)
+
+fit_hp <- auto.arima(hp_cycle, seasonal = FALSE)
+fit_HAM <- auto.arima(HAM_per, seasonal = FALSE)
+
+fcst_hp <- forecast::forecast(fit_hp, h=8)
+fcst_HAM <- forecast::forecast(fit_HAM, h=8)
+
+plot(fcst_hp)
+plot(fcst_HAM)
+```

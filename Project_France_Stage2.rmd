@@ -1,0 +1,409 @@
+---
+title: "Project France 2nd stage - Doležal"
+author: "Jakub Doležal"
+date: "12. 4. 2023"
+output: html_document
+---
+
+#TEAM: Doležal & Karhánek
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+#### Outline:
+
+1.  Data and choice of shocks\
+2.  Appropriate transformations\
+3.  Identification\
+4.  Estimation, forecasting\
+
+#### Libraries
+
+```{r, echo = FALSE}
+rm(list=ls())
+
+library(repr)
+library(uroot)
+library(urca)
+library(strucchange)
+library(stats)
+library(pdfetch)
+library(xts)
+library(ggplot2)
+library(ggfortify) 
+library(forecast)
+library(tsbox) 
+library(seasonal)
+library(tseries)
+library(TSA)
+library(mFilter)
+library(neverhpfilter)
+library(vars)
+library(readxl)
+library(svars)
+```
+
+#### 1. Data and choice of shocks
+
+In our quest for knowledge of macroeconomic modeling, we move to the second stage only with period-on-period GDP and HICP as they appear to be more stationary than their y-o-y counterparts.\
+We are instructed to capture monetary policy shock, thus the first time series we select is 3-month short term interest rate. Given the fact that the EURO and unified monetary policy associated with it was implemented in 1999 we need to merge several time-series together. Our complimentary data of inflation and GDP start at 1995 and 1996 respectively. We are therefore interested in the monetary policy on the scope of 1995-2023. Thus we merge data pre-EURO (1995-1998) with EURO era 1999-2023. However, given the nature monetary policy was conducted in recent years, we introduce shadow rates into the model, WU-XIA shadow rates to be specific, for the period 2010-2022. Our final time series is thus a product of 3 interest rate series all focused on 3-month interest rate.
+
+The interest rate time series were obtained from EUROSTAT:
+
+France IR 1995-1998:
+
+<https://ec.europa.eu/eurostat/databrowser/view/IRT_H_MR3_M/default/table?lang=en>
+
+Euro Area rates 1999-2023:
+
+<https://ec.europa.eu/eurostat/databrowser/view/IRT_ST_M__custom_5732896/default/table?lang=en>
+
+WU-XIA shadow rates:
+
+<https://sites.google.com/view/jingcynthiawu/shadow-rates>
+
+They were merged manually into .csv file due to difference in formatting that ts() function could not process.\
+
+As for the other shock we chose crude oil prices. Specifically we fetch data from FRED - Global price of Brent Crude which is standardized price used for worldwide Crude oil trading. Again for the period of 1995-2023.
+
+Furthermore, we include EUR/USD exchange rate. Exchange rates for pre-ECU times are extrapolated using F/USD exchange rates.
+
+**Data download**
+
+```{r time series selection}
+gdp_xts_q <- pdfetch_EUROSTAT("namq_10_gdp", S_ADJ="SCA", NA_ITEM="B1GQ", FREQ="Q", UNIT="CLV15_MEUR", GEO="FR")
+
+inf_xts_m <- pdfetch_EUROSTAT("PRC_HICP_MIDX", CL_COICOP="CP00", FREQ="M", UNIT="I15", GEO="FR")
+inf_xts_m00 <- inf_xts_m[,"M.I15.CP00.FR"]
+
+France_IR_rates <- pdfetch_EUROSTAT("IRT_H_MR3_M", GEO="FR")
+EA_IR_all <- pdfetch_EUROSTAT("IRT_ST_M", GEO="EA")
+EA_IR_3M <- EA_IR_all[,"M.IRT_M3.EA"]
+shadow <- read_excel("Shadow.xls")
+
+oil_price <- pdfetch_FRED("POILBREUSDM")
+
+FR_USD_rates <- pdfetch_FRED("EXFRUS")
+FR_EUR_rates <- pdfetch_EUROSTAT("ERT_H_EUR_Q", GEO="FR")
+FR_EUR_rates <- FR_EUR_rates[,"Q.AVG.NAT.FRF"]
+ex_rates <- pdfetch_EUROSTAT("ERT_BIL_EUR_Q", GEO="USD")
+EUR_USD_er <- ex_rates[,"Q.AVG.NAC.USD"]
+```
+
+**Some needed manipulation, converting monthly to quarterly**
+
+```{r manipulation}
+gdp <- ts_first_of_period(gdp_xts_q)
+gdp <- ts_ts(gdp)
+
+inf <- ts_first_of_period(inf_xts_m00)
+inf <- ts_ts(inf)
+
+shadowts <- ts(shadow[,2], start=c(1999,1), frequency = 12)
+IR1 <- ts_first_of_period(France_IR_rates)
+IR1_ts <- ts_ts(IR1)
+ir <- ts(c(IR1_ts, shadowts),start=start(IR1_ts), frequency=frequency(IR1_ts))
+
+oil <- ts_first_of_period(oil_price)
+oil <- ts_ts(oil)
+
+EX_FR_USD <- ts_first_of_period(FR_USD_rates)
+EX_FR_USD <- ts_ts(EX_FR_USD)
+EX_FR_USD <- window(EX_FR_USD, start = c(1994,12), end = c(1998,12))
+EX_FR_USD <- as.xts(EX_FR_USD)
+EX_FR_USD <- to.period(EX_FR_USD, period = "quarter", OHLC = FALSE)
+EX_FR_USD <- ts_first_of_period(EX_FR_USD)
+EX_FR_USD <- ts_ts(EX_FR_USD)
+
+EX_FR_EUR <- ts_first_of_period(FR_EUR_rates)
+EX_FR_EUR <- ts_ts(EX_FR_EUR)
+EX_FR_EUR <- window(EX_FR_EUR, start = c(1995,1), end = c(1998,4))
+
+EX_FR_USD_EUR_ratio <- EX_FR_EUR/EX_FR_USD
+
+EX_EUR_USD <- ts_first_of_period(EUR_USD_er)
+EX_EUR_USD <- ts_ts(EX_EUR_USD)
+EX_EUR_USD <- window(EX_EUR_USD, start = c(1999,1))
+
+ex <- ts(c(EX_FR_USD_EUR_ratio, EX_EUR_USD), start = start(EX_FR_USD_EUR_ratio), frequency = frequency(EX_FR_USD_EUR_ratio))
+
+gdp_xts <- as.xts(gdp)
+inf_xts <- as.xts(inf)
+ir_xts <- as.xts(ir)
+oil_xts <- as.xts(oil)
+er_xts <- as.xts(ex)
+
+autoplot(gdp_xts)
+autoplot(inf_xts)
+autoplot(ir_xts)
+autoplot(oil_xts)
+autoplot(er_xts)
+
+data_var <- merge.xts(gdp_xts, inf_xts, ir_xts, oil_xts, er_xts)
+data_var <- to.period(data_var, period = "quarter", OHLC = FALSE)
+data_var <- ts_first_of_period(data_var)
+```
+
+#### 2. Transformation of the time series
+
+All of our time series are now of quarterly frequency. There is one issue connected to this --- HICP transformed into quarterly data is, similarly to the 1st stage, non-stationary after taking first differences.\
+
+There is some diagnostic work needed to be done on the time series we selected. First of all we need to take logarithms of our series (following the forum, IR stays in levels). We then proceed to seasonal adjustments to HICP, Brent Crude Oil price and ER. We then test for stationarity and apply differencing to GDP, HICP, Brent price and EUR/USD exchange rate.
+
+```{r time series transformation, diagnostics}
+gdp_var <- ts(data_var$gdp_xts, start = c(1996,1), frequency = 4)
+inf_var <- ts(data_var$inf_xts, start = c(1996,1), frequency = 4)
+ir_var <- ts(data_var$ir_xts, start = c(1996,1), frequency = 4)
+oil_var <- ts(data_var$oil_xts, start = c(1996,1), frequency = 4)
+er_var <- ts(data_var$er_xts, start = c(1996,1), frequency = 4)
+
+l_gdp <- log(gdp_var)
+l_inf <- log(inf_var)
+l_oil <- log(oil_var)
+l_er <- log(er_var)
+
+autoplot(gdp_xts)
+
+xsl_inf <- seas(l_inf)
+sl_inf <- xsl_inf$data[,1]
+autoplot(sl_inf)
+
+xsl_oil <- seas(l_oil)
+sl_oil <- xsl_oil$data[,1]
+autoplot(sl_oil)
+
+xsl_er <- seas(l_er)
+sl_er <- xsl_er$data[,1]
+autoplot(sl_er)
+
+GDP <- diff(l_gdp)*100
+INF <- diff(sl_inf)*100
+IR <- ir_var
+OIL <- diff(sl_oil)*100
+ER <- diff(l_er)*100
+
+adf.test(GDP)
+adf.test(INF)
+adf.test(IR)
+adf.test(OIL)
+adf.test(ER)
+
+autoplot(GDP, main = "q-o-q log-differenced GDP")
+autoplot(INF, main = "q-o-q log-differenced SA HICP")
+autoplot(IR, main = "3M interest rate/shadow rate")
+autoplot(OIL, main = "q-o-q log-differenced SA Brent Crude Oil Price")
+autoplot(ER)
+
+VAR_data <- ts.union(GDP, INF, OIL, IR, ER)
+VAR_data <- VAR_data[-1,]
+```
+
+#### 3. Identification
+
+##### Estimation, Cholesky decomposition
+
+We order the variables the following way: GDP, INF, OIL, IR, ER. Such ordering follows two papers. First one is Borys, Horváth and Franta (2009) who present classical monetary VAR for Czech Republic. The other paper by Bernanke, Gertler and Watson (1997) incorporates oil price shocks into monetary VAR.
+
+GDP and inflation come first as slow moving, persistent variables. I opt for placing oil price third as I find them relatively exogenous. Furthermore, fluctuations in the ER, similarly to IR, in some cases stem from monetary policy actions. However they are mainly driven by international financial flows and because of that we put them after IR and before OIL.\
+
+```{r time series identification, Cholesky decomposition}
+VAR_sel_1 <- VARselect(VAR_data, lag.max = 8, type = "const")
+VAR_sel_1$selection
+
+VAR1 <- VAR(VAR_data, p=1, type = "const")
+summary(VAR1)
+
+par(mar = c(1, 1, 1, 1))
+plot(VAR1)
+
+var1_cholesky <- id.chol(VAR1)
+var1_bootirf <- wild.boot(var1_cholesky, design = "fixed", distr = "gaussian", n.ahead = 20, nboot = 100)
+plot(var1_bootirf, lowerq = 0.05, upperq = 0.95)
+
+plot(vars::irf(VAR1, impulse = "OIL", response = "GDP", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "OIL", response = "INF", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "IR", response = "GDP", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "IR", response = "INF", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "ER", response = "GDP", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "ER", response = "INF", confint = 1, n.ahead = 20))
+
+```
+
+##### SVAR
+
+We carry on with constructing SVAR under following assumptions which are again based on the two aforementioned papers:\
+1. GDP contemporaneously responds to only its own shocks\
+2. Inflation responds GDP and oil prices\
+3. Oil price again responds to its own shocks\
+4. Policy rate responds to GDP and ER\
+5. ER responds to all the variables\
+
+```{r Amat, Bmat}
+A_MTX <- diag(5)
+B_MTX <- diag(5)
+
+diag(A_MTX) = 1
+diag(B_MTX) = NA
+
+#A_MTX[1, 2] <- NA
+#A_MTX[1, 3] <- NA
+#A_MTX[1, 4] <- NA
+#A_MTX[1, 5] <- NA
+A_MTX[2, 1] <- NA
+A_MTX[2, 3] <- NA
+#A_MTX[2, 4] <- NA
+#A_MTX[2, 5] <- NA
+#A_MTX[3, 1] <- NA
+#A_MTX[3, 2] <- NA
+#A_MTX[3, 4] <- NA
+#A_MTX[3, 5] <- NA
+A_MTX[4, 1] <- NA
+#A_MTX[4, 2] <- NA
+#A_MTX[4, 3] <- NA
+A_MTX[4, 5] <- NA
+A_MTX[5, 1] <- NA
+A_MTX[5, 2] <- NA
+A_MTX[5, 3] <- NA
+A_MTX[5, 4] <- NA
+
+A_MTX
+B_MTX
+```
+
+```{r SVAR}
+structVAR1 <- SVAR(VAR1, Amat = A_MTX, Bmat = B_MTX)
+structVAR1_irf <- vars::irf(structVAR1, n.ahead = 20, ci = 0.95, cumulative = F, boot = T)
+```
+
+SVAR Impulse Responses:
+
+```{r}
+df <- data.frame(seq(0,20,1), structVAR1_irf$irf$OIL[,1], structVAR1_irf$Lower$OIL[,1], structVAR1_irf$Upper$OIL[,1])
+colnames(df) <- c("Period", "GDP", "low", "up")
+
+ggplot(df, aes(x=Period, y=GDP)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from OIL") + theme_classic()
+
+df2 <- data.frame(seq(0,20,1), structVAR1_irf$irf$OIL[,2], structVAR1_irf$Lower$OIL[,2], structVAR1_irf$Upper$OIL[,2])
+colnames(df2) <- c("Period", "INF", "low", "up")
+
+ggplot(df2, aes(x=Period, y=INF)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from OIL") + theme_classic()
+
+df3 <- data.frame(seq(0,20,1), structVAR1_irf$irf$IR[,1], structVAR1_irf$Lower$IR[,1], structVAR1_irf$Upper$IR[,1])
+colnames(df3) <- c("Period", "GDP", "low", "up")
+
+ggplot(df3, aes(x=Period, y=GDP)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from IR") + theme_classic()
+
+df4 <- data.frame(seq(0,20,1), structVAR1_irf$irf$IR[,2], structVAR1_irf$Lower$IR[,2], structVAR1_irf$Upper$IR[,2])
+colnames(df4) <- c("Period", "INF", "low", "up")
+
+ggplot(df4, aes(x=Period, y=INF)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from IR") + theme_classic()
+
+df5 <- data.frame(seq(0,20,1), structVAR1_irf$irf$ER[,1], structVAR1_irf$Lower$ER[,1], structVAR1_irf$Upper$ER[,1])
+colnames(df5) <- c("Period", "GDP", "low", "up")
+
+ggplot(df5, aes(x=Period, y=GDP)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from ER") + theme_classic()
+
+df6 <- data.frame(seq(0,20,1), structVAR1_irf$irf$ER[,2], structVAR1_irf$Lower$ER[,2], structVAR1_irf$Upper$ER[,2])
+colnames(df6) <- c("Period", "INF", "low", "up")
+
+ggplot(df6, aes(x=Period, y=INF)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from ER") + theme_classic()
+
+```
+
+##### Alternative SVAR
+
+Assumptions similar to the previous SVAR are applied with the exception of:\
+
+1.  Inflation is driven not only by oil prices but also the exchange rate\
+2.  Policy rates are set based on real GDP and inflation but not the exchange rate\
+3.  Exchange rate is not driven by real GDP\
+
+```{r}
+A_MTX <- diag(5)
+B_MTX <- diag(5)
+
+diag(A_MTX) = 1
+diag(B_MTX) = NA
+
+#A_MTX[1, 2] <- NA
+#A_MTX[1, 3] <- NA
+#A_MTX[1, 4] <- NA
+#A_MTX[1, 5] <- NA
+#A_MTX[2, 1] <- NA
+A_MTX[2, 3] <- NA
+#A_MTX[2, 4] <- NA
+A_MTX[2, 5] <- NA
+#A_MTX[3, 1] <- NA
+#A_MTX[3, 2] <- NA
+#A_MTX[3, 4] <- NA
+#A_MTX[3, 5] <- NA
+A_MTX[4, 1] <- NA
+A_MTX[4, 2] <- NA
+#A_MTX[4, 3] <- NA
+#A_MTX[4, 5] <- NA
+#A_MTX[5, 1] <- NA
+A_MTX[5, 2] <- NA
+A_MTX[5, 3] <- NA
+A_MTX[5, 4] <- NA
+
+A_MTX
+B_MTX
+```
+
+```{r}
+structVAR2 <- SVAR(VAR1, Amat = A_MTX, Bmat = B_MTX)
+structVAR2_irf <- vars::irf(structVAR1, n.ahead = 20, ci = 0.95, cumulative = F, boot = T)
+```
+
+SVAR Impulse Responses:
+
+```{r}
+df <- data.frame(seq(0,20,1), structVAR2_irf$irf$OIL[,1], structVAR2_irf$Lower$OIL[,1], structVAR2_irf$Upper$OIL[,1])
+colnames(df) <- c("Period", "GDP", "low", "up")
+
+ggplot(df, aes(x=Period, y=GDP)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from OIL")
+
+df2 <- data.frame(seq(0,20,1), structVAR2_irf$irf$OIL[,2], structVAR2_irf$Lower$OIL[,2], structVAR2_irf$Upper$OIL[,2])
+colnames(df2) <- c("Period", "INF", "low", "up")
+
+ggplot(df2, aes(x=Period, y=INF)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from OIL")
+
+df3 <- data.frame(seq(0,20,1), structVAR2_irf$irf$IR[,1], structVAR2_irf$Lower$IR[,1], structVAR2_irf$Upper$IR[,1])
+colnames(df3) <- c("Period", "GDP", "low", "up")
+
+ggplot(df3, aes(x=Period, y=GDP)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from IR")
+
+df4 <- data.frame(seq(0,20,1), structVAR2_irf$irf$IR[,2], structVAR2_irf$Lower$IR[,2], structVAR2_irf$Upper$IR[,2])
+colnames(df4) <- c("Period", "INF", "low", "up")
+
+ggplot(df4, aes(x=Period, y=INF)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from IR")
+
+df5 <- data.frame(seq(0,20,1), structVAR2_irf$irf$ER[,1], structVAR2_irf$Lower$ER[,1], structVAR2_irf$Upper$ER[,1])
+colnames(df5) <- c("Period", "GDP", "low", "up")
+
+ggplot(df5, aes(x=Period, y=GDP)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from ER")
+
+df6 <- data.frame(seq(0,20,1), structVAR2_irf$irf$ER[,2], structVAR2_irf$Lower$ER[,2], structVAR2_irf$Upper$ER[,2])
+colnames(df6) <- c("Period", "INF", "low", "up")
+
+ggplot(df6, aes(x=Period, y=INF)) + geom_line() + geom_line(aes(y=up), colour="grey") + geom_line(aes(y=low), colour="grey") + geom_hline(yintercept = 0, color="red") + ggtitle("SVAR Impulse Response from ER")
+```
+
+#### 4. Estimation, forecasting, FEVDs
+
+```{r forecasting}
+a <- predict(VAR1, n.ahead = 8, ci = 0.95)
+par(mar = c(1, 1, 1, 1))
+plot(predict(VAR1))
+```
+
+```{r fevd}
+par(mar = c(1, 1, 1, 1))
+plot(fevd(VAR1))
+```

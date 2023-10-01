@@ -1,0 +1,345 @@
+---
+title: "Project France 3rd stage - Doležal"
+author: "Jakub Doležal"
+date: "3. 5. 2023"
+output: html_document
+---
+
+#TEAM: Doležal & Karhánek
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Checking robustness
+
+#### Outline:
+
+1.  Data\
+2.  VAR in levels\
+3.  VECM\
+4.  BVAR\
+5.  Local projections\
+
+#### Libraries
+
+```{r, echo = FALSE}
+rm(list=ls())
+
+library(repr)
+library(uroot)
+library(urca)
+library(strucchange)
+library(stats)
+library(pdfetch)
+library(xts)
+library(ggplot2)
+library(ggfortify) 
+library(forecast)
+library(tsbox) 
+library(seasonal)
+library(tseries)
+library(TSA)
+library(mFilter)
+library(neverhpfilter)
+library(vars)
+library(readxl)
+library(svars)
+library(BVAR)
+library(lpirfs)
+```
+
+#### 1. Data and choice of shocks
+
+**Data download**
+
+```{r time series selection}
+gdp_xts_q <- pdfetch_EUROSTAT("namq_10_gdp", S_ADJ="SCA", NA_ITEM="B1GQ", FREQ="Q", UNIT="CLV15_MEUR", GEO="FR")
+
+inf_xts_m <- pdfetch_EUROSTAT("PRC_HICP_MIDX", CL_COICOP="CP00", FREQ="M", UNIT="I15", GEO="FR")
+inf_xts_m00 <- inf_xts_m[,"M.I15.CP00.FR"]
+
+France_IR_rates <- pdfetch_EUROSTAT("IRT_H_MR3_M", GEO="FR")
+EA_IR_all <- pdfetch_EUROSTAT("IRT_ST_M", GEO="EA")
+EA_IR_3M <- EA_IR_all[,"M.IRT_M3.EA"]
+shadow <- read_excel("Shadow.xls")
+
+oil_price <- pdfetch_FRED("POILBREUSDM")
+
+FR_USD_rates <- pdfetch_FRED("EXFRUS")
+FR_EUR_rates <- pdfetch_EUROSTAT("ERT_H_EUR_Q", GEO="FR")
+FR_EUR_rates <- FR_EUR_rates[,"Q.AVG.NAT.FRF"]
+ex_rates <- pdfetch_EUROSTAT("ERT_BIL_EUR_Q", GEO="USD")
+EUR_USD_er <- ex_rates[,"Q.AVG.NAC.USD"]
+```
+
+**Some needed manipulation, converting monthly to quarterly**
+
+```{r manipulation}
+gdp <- ts_first_of_period(gdp_xts_q)
+gdp <- ts_ts(gdp)
+
+inf <- ts_first_of_period(inf_xts_m00)
+inf <- ts_ts(inf)
+
+shadowts <- ts(shadow[,2], start=c(1999,1), frequency = 12)
+IR1 <- ts_first_of_period(France_IR_rates)
+IR1_ts <- ts_ts(IR1)
+ir <- ts(c(IR1_ts, shadowts),start=start(IR1_ts), frequency=frequency(IR1_ts))
+
+oil <- ts_first_of_period(oil_price)
+oil <- ts_ts(oil)
+
+EX_FR_USD <- ts_first_of_period(FR_USD_rates)
+EX_FR_USD <- ts_ts(EX_FR_USD)
+EX_FR_USD <- window(EX_FR_USD, start = c(1994,12), end = c(1998,12))
+EX_FR_USD <- as.xts(EX_FR_USD)
+EX_FR_USD <- to.period(EX_FR_USD, period = "quarter", OHLC = FALSE)
+EX_FR_USD <- ts_first_of_period(EX_FR_USD)
+EX_FR_USD <- ts_ts(EX_FR_USD)
+
+EX_FR_EUR <- ts_first_of_period(FR_EUR_rates)
+EX_FR_EUR <- ts_ts(EX_FR_EUR)
+EX_FR_EUR <- window(EX_FR_EUR, start = c(1995,1), end = c(1998,4))
+
+EX_FR_USD_EUR_ratio <- EX_FR_EUR/EX_FR_USD
+
+EX_EUR_USD <- ts_first_of_period(EUR_USD_er)
+EX_EUR_USD <- ts_ts(EX_EUR_USD)
+EX_EUR_USD <- window(EX_EUR_USD, start = c(1999,1))
+
+ex <- ts(c(EX_FR_USD_EUR_ratio, EX_EUR_USD), start = start(EX_FR_USD_EUR_ratio), frequency = frequency(EX_FR_USD_EUR_ratio))
+
+gdp_xts <- as.xts(gdp)
+inf_xts <- as.xts(inf)
+ir_xts <- as.xts(ir)
+oil_xts <- as.xts(oil)
+er_xts <- as.xts(ex)
+
+autoplot(gdp_xts, main = "GDP")
+autoplot(inf_xts, main = "HICP")
+autoplot(ir_xts, main = "3-month IR")
+autoplot(oil_xts, main = "Brent Crude Oil")
+autoplot(er_xts, main = "EUR/USD")
+
+data_var <- merge.xts(gdp_xts, inf_xts, ir_xts, oil_xts, er_xts)
+data_var <- to.period(data_var, period = "quarter", OHLC = FALSE)
+data_var <- ts_first_of_period(data_var)
+```
+
+#### 2. Transformation of the time series
+
+All of our time series are now of quarterly frequency. We take logarithms of our time series for the following steps.
+
+```{r time series transformation, diagnostics}
+gdp_var <- ts(data_var$gdp_xts, start = c(1996,1), frequency = 4)
+inf_var <- ts(data_var$inf_xts, start = c(1996,1), frequency = 4)
+ir_var <- ts(data_var$ir_xts, start = c(1996,1), frequency = 4)
+oil_var <- ts(data_var$oil_xts, start = c(1996,1), frequency = 4)
+er_var <- ts(data_var$er_xts, start = c(1996,1), frequency = 4)
+
+lgdp <- log(gdp_var)
+linf <- log(inf_var)
+loil <- log(oil_var)
+ler <- log(er_var)
+
+xsl_inf <- seas(linf)
+sl_inf <- xsl_inf$data[,1]
+
+xsl_oil <- seas(loil)
+sl_oil <- xsl_oil$data[,1]
+
+xsl_er <- seas(ler)
+sl_er <- xsl_er$data[,1]
+
+GDP <- lgdp
+INF <- sl_inf
+IR <- ir_var
+OIL <- sl_oil
+ER <- sl_er
+
+adf.test(GDP)
+adf.test(INF)
+adf.test(IR)
+adf.test(OIL)
+adf.test(ER)
+
+autoplot(GDP, main = "log of GDP")
+autoplot(INF, main = "SA log of HICP (2015 = 100)")
+autoplot(IR, main = "3M interest rate/shadow rate")
+autoplot(OIL, main = "SA log of Brent Crude Oil Price")
+autoplot(ER, main = "SA log of EUR/USD exchange rate")
+
+VAR_data <- ts.union(GDP, INF, OIL, IR, ER)
+```
+
+#### 2. VAR in levels
+
+```{r}
+VAR_sel_1 <- VARselect(VAR_data, lag.max = 6, type = "const")
+VAR_sel_1$selection
+
+VAR1 <- VAR(VAR_data, p=2, type = "const")
+summary(VAR1)
+par(mar = c(1, 1, 1, 1))
+#plot(VAR1)
+
+var1_cholesky <- id.chol(VAR1)
+var1_bootirf <- wild.boot(var1_cholesky, design = "fixed", distr = "gaussian", n.ahead = 20, nboot = 100)
+plot(var1_bootirf, lowerq = 0.05, upperq = 0.95)
+
+plot(vars::irf(VAR1, impulse = "OIL", response = "GDP", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "OIL", response = "INF", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "IR", response = "GDP", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "IR", response = "INF", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "ER", response = "GDP", confint = 1, n.ahead = 20))
+
+plot(vars::irf(VAR1, impulse = "ER", response = "INF", confint = 1, n.ahead = 20))
+
+```
+
+Unfortunately, orthogonal IRFs from VAR in levels from OIL and IR go against the economic intuition. Firstly, inflation goes down with higher Brent oil price --- unlikely in case of oil importing country. Secondly, according to the IRFs, both real GDP and inflation rises steadily with higher policy rates. Orthogonal IRFs also contradict IRFs from VAR and SVAR constructed in stage 2. Taking closer look at the IRF from IR computed from 2nd stage VAR, real GDP should more or less stay the same while inflation declines.
+
+```{r fcst}
+predict(VAR1, n.ahead = 8, ci = 0.95)
+par(mar = c(1, 1, 1, 1))
+plot(predict(VAR1, n.ahead = 8, ci = 0.95))
+```
+
+As of forecasting, the future development of included variables seems plausible except for the indicated sharp depreciation of Euro.
+
+#### 3. VECM
+
+We are tasked to perform Johansen procedure to test for cointegration in our vector of variables.
+
+```{r}
+VAR1_coi <- VAR_data
+coint_var1 <- ca.jo(VAR1_coi, type = "eigen", ecdet = "const", K = 2)
+summary(coint_var1)
+plot(coint_var1)
+```
+
+```{r}
+coint_var2 <- ca.jo(VAR1_coi, type="trace", ecdet = "const", K = 2)
+summary(coint_var2)
+plot(coint_var2)
+```
+
+Both procedures suggest there is only one cointegrated vector.
+
+Getting OLS representation:
+
+```{r}
+cajorls_var1 <- cajorls(coint_var1, r=1)
+summary(cajorls_var1$rlm)
+```
+
+```{r}
+vecm_var1 <- vec2var(coint_var1, r=1)
+summary(vecm_var1)
+```
+VECM returns very similar IRFs as VAR in levels. However, it forecasts much smaller depreciation of Euro and not so rapid growth of oil prices.
+
+```{r}
+plot(vars::irf(vecm_var1,impulse = "OIL", response = "GDP", n.ahead = 20))
+plot(vars::irf(vecm_var1,impulse = "OIL", response = "INF", n.ahead = 20))
+plot(vars::irf(vecm_var1,impulse = "IR", response = "GDP", n.ahead = 20))
+plot(vars::irf(vecm_var1,impulse = "IR", response = "INF", n.ahead = 20))
+plot(vars::irf(vecm_var1,impulse = "ER", response = "GDP", n.ahead = 20))
+plot(vars::irf(vecm_var1,impulse = "ER", response = "INF", n.ahead = 20))
+```
+
+```{r}
+plot(predict(vecm_var1), n.ahead = 8)
+```
+
+#### 4. BVAR
+
+##### Transformations for BVAR
+
+```{r}
+BVAR_data <- ts.union(GDP, INF, OIL, IR, ER)
+#datawoNAs <- BVAR_data[-1,]
+BVAR_data <- ts(BVAR_data, start = c(1996,2), frequency = 4)
+```
+
+##### BVAR model
+
+```{r}
+bvar_select<-VARselect(BVAR_data, lag.max=8, type ="none")
+bvar_select$selection
+
+priors <- bv_priors(mn = bv_mn(b=0))
+?bv_priors
+BVAR1 <- bvar(BVAR_data, priors = priors, lags = 3, n_draw = 10000L, n_burn = 1000L, n_thin = 1L, verbose = FALSE) 
+summary(BVAR1)
+
+plot(BVAR1)
+```
+
+##### IRFs from BVAR
+
+```{r}
+plot(BVAR::irf(BVAR1))
+```
+
+##### BVAR forecast
+
+```{r BVAR fcst}
+BVARfcst <- predict(BVAR1, horizon = 8, conf_bands = c(0.05, 0.16))
+
+plot(BVARfcst, vars = "GDP", area = TRUE, t_back = 32)
+plot(BVARfcst, vars = "INF", area = TRUE, t_back = 32)
+plot(BVARfcst, vars = "OIL", area = TRUE, t_back = 32)
+plot(BVARfcst, vars = "IR", area = TRUE, t_back = 32)
+plot(BVARfcst, vars = "ER", area = TRUE, t_back = 32)
+```
+
+Forecasting via BVAR almost 1:1 replicates our VAR forecast from the 2nd stage. We do not find any major difference. Real GDP growth should stay in positive number, inflation declines, policy rates are forecasted to stay constant for the next two years, EURO slowly depreciates and no major dynamics are predicted for the oil prices.
+
+#### 5. Local projections
+
+```{r}
+VAR1_LP <- BVAR_data
+vardata1_df <- ts_data.frame(VAR1_LP)
+vardata_df2 <- ts_wide(vardata1_df)
+vardata_df2 <- vardata_df2[c(-1)]
+
+lp_var1 <- lp_lin(vardata_df2, lags_endog_lin = 1, trend = 0, shock_type = 0, confint = 1.96, hor = 20)
+plot(lp_var1)
+```
+
+
+```{r}
+var_LP <- VAR(VAR1_LP, p=1, type = "const")
+var_LP_irf <- vars::irf(var_LP, n.ahead = 20)
+var1_cholesky <- id.chol(var_LP)
+var1_cholesky
+
+MP_shock <- 1/var1_cholesky$B[3,3]*(var_LP$varresult$IR$residuals - var1_cholesky$B[3,1]*var_LP$varresult$GDP$residuals - var1_cholesky$B[3,2]*var_LP$varresult$INF$residuals)
+
+IR_residuals <- var_LP$varresult$IR$residuals
+MP_shock_ts <- ts(MP_shock, start = c(1996,1), frequency = 4)
+IR_residuals_ts <- ts(IR_residuals, start = c(1996,1), frequency = 4)
+plot(MP_shock_ts, type = 'l')
+lines(IR_residuals_ts, type = 'l', col = 'red')
+lines(matrix(0, nrow = length(MP_shock_ts)), type = 'l', col = 'black')
+
+```
+
+```{r}
+#MP_shock_df1 <- ts_data.frame(MP_shock_ts)
+#MP_shock_df2 <- ts_wide(MP_shock_df1)
+#MP_shock_df2 <- MP_shock_df2[-1,]
+
+#vardata_df3 <- vardata_df2[4:108,]
+#LP_var1_id <- lp_lin_iv(vardata_df3, shock = MP_shock_df2, lags_endog_lin = 2, trend = 0, confint = 1.96, hor = 20)
+#par(mar = c(1,1,1,1))
+#plot(LP_var1_id)
+```
+
+
